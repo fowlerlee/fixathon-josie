@@ -4,7 +4,8 @@ import os
 import io
 import json
 import yaml
-from flask import Flask, request, jsonify
+import tempfile
+from flask import Flask, request, jsonify, send_file
 from dotenv import load_dotenv
 
 load_dotenv()  # Load .env variables
@@ -12,6 +13,8 @@ load_dotenv()  # Load .env variables
 from google.cloud import vision
 import vertexai
 from vertexai.preview.vision_models import Image as VertexImage, ImageTextModel
+from gemini_agent import GeminiAgent
+from tts_generator import TTSGenerator
 
 app = Flask(__name__)
 
@@ -192,6 +195,73 @@ def upload():
         "vision": vision_results,
         "ai": ai_results
     }), 200
+
+
+@app.route("/upload-with-audio", methods=["POST"])
+def upload_with_audio():
+    """
+    POST /upload-with-audio
+    form-data: file field named 'image'
+    returns: WAV audio file download
+    
+    Process flow:
+    1. Read image from request
+    2. Generate text description using Gemini
+    3. Convert text to audio using Gemini TTS
+    4. Return audio file as download
+    """
+    if "image" not in request.files:
+        return jsonify({"error": "no 'image' file field in request"}), 400
+
+    f = request.files["image"]
+    image_bytes = f.read()
+    if not image_bytes:
+        return jsonify({"error": "empty file"}), 400
+
+    # Initialize agents (lazy initialization)
+    try:
+        gemini_agent = GeminiAgent()
+        tts_generator = TTSGenerator()
+    except Exception as e:
+        return jsonify({"error": "Failed to initialize agents", "details": str(e)}), 500
+
+    # Create temporary file for audio output
+    temp_audio_path = None
+    try:
+        # Generate text description from image
+        try:
+            description_text = gemini_agent.generate_description(image_bytes)
+            if not description_text or not description_text.strip():
+                return jsonify({"error": "Empty description generated"}), 500
+        except Exception as e:
+            return jsonify({"error": "Failed to generate description", "details": str(e)}), 500
+
+        # Generate audio from text
+        try:
+            # Create temporary file for audio
+            temp_audio_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+            temp_audio_path = temp_audio_file.name
+            temp_audio_file.close()  # Close so TTS can write to it
+            
+            tts_generator.generate_audio(description_text, temp_audio_path)
+        except Exception as e:
+            return jsonify({"error": "Failed to generate audio", "details": str(e)}), 500
+
+        # Return audio file as download
+        return send_file(
+            temp_audio_path,
+            mimetype='audio/wav',
+            as_attachment=True,
+            download_name='description.wav'
+        )
+    
+    finally:
+        # Clean up temporary file after sending
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.unlink(temp_audio_path)
+            except Exception:
+                pass  # Ignore cleanup errors
 
 if __name__ == "__main__":
     # For local testing only; Cloud Run will use gunicorn if you prefer.
